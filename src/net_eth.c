@@ -1,3 +1,8 @@
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+__attribute__((weak)) void cherry_trace_net_rx(const void *buf, size_t len, uint16_t proto, uint32_t cpu) { (void)buf; (void)len; (void)proto; (void)cpu; }
+__attribute__((weak)) void cherry_trace_net_tx(const void *buf, size_t len, uint16_t proto, uint32_t cpu) { (void)buf; (void)len; (void)proto; (void)cpu; }
 /*
  * CherryNet - Ethernet II Framing and ARP Cache
  *
@@ -159,6 +164,7 @@ int eth_input(struct netif *nif, struct net_buf *buf)
 
     struct eth_hdr *eth = (struct eth_hdr *)buf->data;
     uint16_t type = ntohs(eth->type);
+    cherry_trace_net_rx(buf->data, buf->len, type, 0);
 
     net_buf_pull(buf, sizeof(struct eth_hdr));
 
@@ -192,6 +198,7 @@ int eth_output(struct netif *nif, struct net_buf *buf, const uint8_t *dst_mac, u
     memcpy(eth->dst, dst_mac, ETH_ALEN);
     memcpy(eth->src, nif->hwaddr, ETH_ALEN);
     eth->type = htons(ethertype);
+    cherry_trace_net_tx(buf->data, buf->len, ethertype, 0);
 
     buf->netif = nif;
     if (nif->send) {
