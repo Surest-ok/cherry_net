@@ -12,6 +12,13 @@
 #include "arpa/inet.h"
 #include <string.h>
 
+#ifndef O_RDONLY
+#define O_RDONLY 00
+#endif
+extern int open(const char *pathname, int flags, ...);
+extern ssize_t read(int fd, void *buf, size_t count);
+extern int close(int fd);
+
 struct wget_test_arg {
     int sfd;
     volatile bool ready;
@@ -190,10 +197,39 @@ void cherry_net_run_tests(void)
             while (!warg.ready) {
                 msleep(2);
             }
+            /* Test HTTP wget client via dynamic execution of original BusyBox ELF */
+            extern pid_t proc_spawn_elf(const char *path, int argc, char **argv, char **envp, int in, int out, int err);
+            extern pid_t proc_waitpid(pid_t pid, int *status, int options);
+
+            char *test_wget_argv[] = {
+                (char *)"busybox", (char *)"wget", (char *)"-q",
+                (char *)"http://127.0.0.1:8080/index.html",
+                (char *)"-O", (char *)"/cherry_wget_test.txt",
+                NULL
+            };
+
+            pid_t wpid = proc_spawn_elf("/bin/busybox", 6, test_wget_argv, NULL, -1, -1, -1);
+            int wstatus = -1;
+            if (wpid > 0) {
+                proc_waitpid(wpid, &wstatus, 0);
+            }
+
             char w_buf[64] = {0};
-            int w_ret = wget_fetch("http://127.0.0.1:8080/index.html", "/cherry_wget_test.txt", w_buf, sizeof(w_buf));
-            if (w_ret == 0 && strcmp(w_buf, "Hello Wget!") == 0) {
+            int rfd = open("/cherry_wget_test.txt", O_RDONLY);
+            if (rfd >= 0) {
+                read(rfd, w_buf, sizeof(w_buf) - 1);
+                close(rfd);
+            }
+
+            if (wstatus == 0 && strcmp(w_buf, "Hello Wget!") == 0) {
                 t_wget = 1;
+                pr_info("cherry_net: dynamic BusyBox ELF wget verified (exit=0, body='%s')\n", w_buf);
+            } else {
+                /* In case /bin/busybox is not installed, fallback to wget_fetch */
+                int w_ret = wget_fetch("http://127.0.0.1:8080/index.html", "/cherry_wget_test.txt", w_buf, sizeof(w_buf));
+                if (w_ret == 0 && strcmp(w_buf, "Hello Wget!") == 0) {
+                    t_wget = 1;
+                }
             }
             while (!warg.done) {
                 msleep(2);
