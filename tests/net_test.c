@@ -12,6 +12,30 @@
 #include "arpa/inet.h"
 #include <string.h>
 
+struct wget_test_arg {
+    int sfd;
+    volatile bool ready;
+    volatile bool done;
+};
+
+static int wget_mock_worker(void *p)
+{
+    struct wget_test_arg *a = (struct wget_test_arg *)p;
+    a->ready = true;
+    struct sockaddr_in csin;
+    socklen_t clen = sizeof(csin);
+    int c = accept(a->sfd, (struct sockaddr *)&csin, &clen);
+    if (c >= 0) {
+        char req_buf[128];
+        recv(c, req_buf, sizeof(req_buf), 0);
+        const char *resp = "HTTP/1.0 200 OK\r\nContent-Length: 11\r\n\r\nHello Wget!";
+        send(c, resp, strlen(resp), 0);
+        close(c);
+    }
+    a->done = true;
+    return 0;
+}
+
 void cherry_net_run_tests(void)
 {
     pr_info("cherry_net: ==> starting cherrynet acceptance test suite...\n");
@@ -132,10 +156,57 @@ void cherry_net_run_tests(void)
         t_iperf2 = 1;
     }
 
-    int all_ok = t_virtio && t_ifconfig && t_mq_rss && t_ipv4_arp &&
-                 t_ipv6_ndp && t_ping && t_udp && t_tcp && t_iperf2;
+    /* 10. Verify Linux net_device Model registration */
+    int t_netdev = 0;
+    struct net_device *nd_lo = dev_get_by_name("lo0");
+    struct net_device *nd_eth = dev_get_by_name("eth0");
+    struct net_device *nd_def = dev_get_default();
+    if (nd_lo && nd_eth && nd_def && (nd_lo->flags & IFF_UP) && (nd_eth->flags & IFF_UP)) {
+        t_netdev = 1;
+    }
 
-    pr_info("cherry_net: [net-verify] virtio=%s ifconfig=%s mq_rss=%s ipv4_arp=%s ipv6_ndp=%s ping=%s udp=%s tcp=%s iperf2=%s all=%s\n",
+    /* 11. Verify iperf3 Benchmark */
+    int t_iperf3 = 0;
+    if (iperf3_run_self_test() == 0) {
+        t_iperf3 = 1;
+    }
+
+    /* 12. Verify HTTP wget client */
+    int t_wget = 0;
+    int http_srv = socket(AF_INET, SOCK_STREAM, 0);
+    if (http_srv >= 0) {
+        struct sockaddr_in hsin;
+        memset(&hsin, 0, sizeof(hsin));
+        hsin.sin_family = AF_INET;
+        hsin.sin_port = htons(8080);
+        hsin.sin_addr.s_addr = IP4_ADDR(127, 0, 0, 1);
+        bind(http_srv, (struct sockaddr *)&hsin, sizeof(hsin));
+        listen(http_srv, 1);
+
+        /* Spawn simple server thread */
+        struct wget_test_arg warg = { .sfd = http_srv, .ready = false, .done = false };
+        struct task_struct *wt = kthread_run(wget_mock_worker, &warg, "wget_srv");
+        if (wt) {
+            while (!warg.ready) {
+                msleep(2);
+            }
+            char w_buf[64] = {0};
+            int w_ret = wget_fetch("http://127.0.0.1:8080/index.html", "/cherry_wget_test.txt", w_buf, sizeof(w_buf));
+            if (w_ret == 0 && strcmp(w_buf, "Hello Wget!") == 0) {
+                t_wget = 1;
+            }
+            while (!warg.done) {
+                msleep(2);
+            }
+        }
+        close(http_srv);
+    }
+
+    int all_ok = t_virtio && t_ifconfig && t_mq_rss && t_ipv4_arp &&
+                 t_ipv6_ndp && t_ping && t_udp && t_tcp && t_iperf2 &&
+                 t_netdev && t_iperf3 && t_wget;
+
+    pr_info("cherry_net: [net-verify] virtio=%s ifconfig=%s mq_rss=%s ipv4_arp=%s ipv6_ndp=%s ping=%s udp=%s tcp=%s iperf2=%s netdev=%s iperf3=%s wget=%s all=%s\n",
             t_virtio ? "pass" : "fail",
             t_ifconfig ? "pass" : "fail",
             t_mq_rss ? "pass" : "fail",
@@ -145,5 +216,8 @@ void cherry_net_run_tests(void)
             t_udp ? "pass" : "fail",
             t_tcp ? "pass" : "fail",
             t_iperf2 ? "pass" : "fail",
+            t_netdev ? "pass" : "fail",
+            t_iperf3 ? "pass" : "fail",
+            t_wget ? "pass" : "fail",
             all_ok ? "pass" : "fail");
 }

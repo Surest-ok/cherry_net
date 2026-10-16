@@ -20,7 +20,10 @@
 #include "net_tcp.h"
 #include "net_socket.h"
 #include "net_virtio.h"
+#include "net_device.h"
 #include "net_iperf2.h"
+#include "net_iperf3.h"
+#include "net_wget.h"
 #include "net_tools.h"
 
 #ifdef __cplusplus

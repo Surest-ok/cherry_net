@@ -7,10 +7,15 @@
 
 #include "net_tools.h"
 #include "net_iperf2.h"
+#include "net_iperf3.h"
+#include "net_wget.h"
 #include "net_if.h"
 #include "cherry_shell.h"
 #include "cherry_kal.h"
 #include <string.h>
+
+CHERRY_SHELL_EXPORT_CMD(wget, cmd_wget, "HTTP client to download files: wget <url> [-O file]");
+CHERRY_SHELL_EXPORT_CMD(iperf3, cmd_iperf3, "iperf3 throughput benchmark: iperf3 -s | -c <ip>");
 
 int net_cmd_ifconfig(int argc, char **argv)
 {

@@ -242,6 +242,38 @@ static int cherry_sock_close(void *sock)
     return 0;
 }
 
+static int cherry_sock_poll(void *sock, void *poll_table)
+{
+    (void)poll_table;
+    struct net_socket *s = (struct net_socket *)sock;
+    if (!s) return -EINVAL;
+
+    int mask = 0;
+    if (s->type == SOCK_STREAM && s->tcp) {
+        if (s->tcp->state == TCP_STATE_LISTEN) {
+            if (s->tcp->accept_queue_head != NULL) {
+                mask |= POLLIN | POLLRDNORM;
+            }
+        } else {
+            if (s->tcp->rx_avail > 0) {
+                mask |= POLLIN | POLLRDNORM;
+            }
+            if (s->tcp->state == TCP_STATE_ESTABLISHED || s->tcp->state == TCP_STATE_CLOSE_WAIT) {
+                mask |= POLLOUT | POLLWRNORM;
+            }
+            if (s->tcp->state == TCP_STATE_CLOSED || s->tcp->state == TCP_STATE_TIME_WAIT) {
+                mask |= POLLHUP;
+            }
+        }
+    } else if (s->type == SOCK_DGRAM && s->udp) {
+        if (s->udp->rx_count > 0) {
+            mask |= POLLIN | POLLRDNORM;
+        }
+        mask |= POLLOUT | POLLWRNORM;
+    }
+    return mask;
+}
+
 static const struct vfs_sock_ops s_cherry_sock_ops = {
     .socket = cherry_sock_socket,
     .bind = cherry_sock_bind,
@@ -256,6 +288,7 @@ static const struct vfs_sock_ops s_cherry_sock_ops = {
     .getsockopt = cherry_sock_getsockopt,
     .shutdown = cherry_sock_shutdown,
     .close = cherry_sock_close,
+    .poll = cherry_sock_poll,
 };
 
 static struct vfs_sockdev s_cherry_sockdev = {

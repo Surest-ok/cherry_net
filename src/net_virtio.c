@@ -1,11 +1,12 @@
 /*
- * CherryNet - VirtIO-Net PCI Network Interface Driver
+ * CherryNet - VirtIO-Net PCI Network Interface Driver via Net Device Model
  *
  * Copyright (c) 2026 ForgeStitch
  * SPDX-License-Identifier: MIT
  */
 
 #include "net_virtio.h"
+#include "net_device.h"
 #include "net_queue.h"
 #include "net_ip6.h"
 #include "cherry_kal.h"
@@ -33,8 +34,7 @@ struct virtio_net_dev {
     spinlock_t          tx_lock;
 };
 
-static struct virtio_net_dev s_virtio_dev;
-static struct netif          s_virtio_netif;
+static struct net_device     *s_virtio_netdev = NULL;
 
 /* I/O Helpers for PCI BAR0 (MMIO on ARM64) */
 static inline uint8_t v_in8(uintptr_t base, int off) {
@@ -58,10 +58,11 @@ static inline void v_out32(uintptr_t base, int off, uint32_t val) {
 
 static int vring_setup(struct virtio_vring *vq, uint16_t num)
 {
-    /* 4KB aligned allocation: Desc (num*16) + Avail (4+2*num) aligned to 4KB, Used (4+8*num) */
-    size_t desc_avail_sz = (num * sizeof(struct vring_desc)) + (sizeof(uint16_t) * (3 + num));
-    size_t desc_avail_padded = (desc_avail_sz + 4095) & ~4095;
-    size_t used_sz = sizeof(uint16_t) * 3 + sizeof(struct vring_used_elem) * num;
+    size_t desc_sz = num * sizeof(struct vring_desc);
+    size_t avail_sz = sizeof(struct vring_avail) + (num * sizeof(uint16_t));
+    size_t used_sz = sizeof(struct vring_used) + (num * sizeof(struct vring_used_elem));
+
+    size_t desc_avail_padded = (desc_sz + avail_sz + 4095) & ~4095;
     size_t total_sz = desc_avail_padded + ((used_sz + 4095) & ~4095) + 4096;
 
     uint8_t *raw = (uint8_t *)kmalloc(total_sz, GFP_KERNEL);
@@ -83,9 +84,9 @@ static int vring_setup(struct virtio_vring *vq, uint16_t num)
     return 0;
 }
 
-static int virtio_net_send(struct netif *nif, struct net_buf *buf)
+static int virtio_netdev_start_xmit(struct net_device *dev, struct net_buf *buf)
 {
-    struct virtio_net_dev *vdev = (struct virtio_net_dev *)nif->priv;
+    struct virtio_net_dev *vdev = (struct virtio_net_dev *)dev->priv;
     if (!vdev || !buf) return -1;
 
     unsigned long flags;
@@ -116,9 +117,6 @@ static int virtio_net_send(struct netif *nif, struct net_buf *buf)
     /* Notify host of TX queue 1 */
     v_out16(vdev->io_base, VIRTIO_PCI_QUEUE_NOTIFY, 1);
 
-    nif->tx_packets++;
-    nif->tx_bytes += (buf->len - sizeof(struct virtio_net_hdr));
-
     spin_unlock_irqrestore(&vdev->tx_lock, flags);
 
     /* Clean completed TX buffers */
@@ -131,10 +129,30 @@ static int virtio_net_send(struct netif *nif, struct net_buf *buf)
     return 0;
 }
 
+static int virtio_netdev_open(struct net_device *dev)
+{
+    (void)dev;
+    return 0;
+}
+
+static int virtio_netdev_stop(struct net_device *dev)
+{
+    (void)dev;
+    return 0;
+}
+
+static const struct net_device_ops s_virtio_netdev_ops = {
+    .ndo_open       = virtio_netdev_open,
+    .ndo_stop       = virtio_netdev_stop,
+    .ndo_start_xmit = virtio_netdev_start_xmit,
+};
+
 void virtio_net_poll(void)
 {
-    struct virtio_net_dev *vdev = &s_virtio_dev;
-    if (!vdev->io_base) return;
+    struct net_device *netdev = s_virtio_netdev;
+    if (!netdev) return;
+    struct virtio_net_dev *vdev = (struct virtio_net_dev *)netdev->priv;
+    if (!vdev || !vdev->io_base) return;
 
     /* Read and clear interrupt status */
     uint8_t isr = v_in8(vdev->io_base, VIRTIO_PCI_ISR);
@@ -154,12 +172,9 @@ void virtio_net_poll(void)
             buf->data += sizeof(struct virtio_net_hdr);
             buf->len = len - sizeof(struct virtio_net_hdr);
             buf->tot_len = buf->len;
-            buf->netif = &s_virtio_netif;
 
-            s_virtio_netif.rx_packets++;
-            s_virtio_netif.rx_bytes += buf->len;
-
-            net_queue_dispatch(buf);
+            /* Push to network stack through net_device abstraction */
+            netif_rx(netdev, buf);
 
             /* Replenish with fresh buffer */
             struct net_buf *fresh = net_buf_alloc();
@@ -195,7 +210,14 @@ static int virtio_net_probe(struct pci_dev *pdev, const struct pci_device_id *id
         return -1;
     }
 
-    struct virtio_net_dev *vdev = &s_virtio_dev;
+    struct net_device *netdev = alloc_etherdev(sizeof(struct virtio_net_dev));
+    if (!netdev) {
+        pr_err("cherry_net: failed to allocate net_device for virtio\n");
+        return -1;
+    }
+
+    struct virtio_net_dev *vdev = (struct virtio_net_dev *)netdev->priv;
+    s_virtio_netdev = netdev;
     memset(vdev, 0, sizeof(*vdev));
     vdev->pdev = pdev;
     vdev->io_base = io;
@@ -216,6 +238,7 @@ static int virtio_net_probe(struct pci_dev *pdev, const struct pci_device_id *id
     for (int i = 0; i < ETH_ALEN; i++) {
         vdev->mac[i] = v_in8(io, VIRTIO_PCI_CONFIG_OFF + i);
     }
+    memcpy(netdev->dev_addr, vdev->mac, ETH_ALEN);
     pr_info("cherry_net: virtio-net hwaddr %02x:%02x:%02x:%02x:%02x:%02x\n",
             vdev->mac[0], vdev->mac[1], vdev->mac[2],
             vdev->mac[3], vdev->mac[4], vdev->mac[5]);
@@ -226,6 +249,7 @@ static int virtio_net_probe(struct pci_dev *pdev, const struct pci_device_id *id
     if (rx_size > VIRTIO_NET_QUEUE_SIZE) rx_size = VIRTIO_NET_QUEUE_SIZE;
     if (vring_setup(&vdev->rx_vq, rx_size) != 0) {
         pr_err("cherry_net: rx vring setup failed\n");
+        free_netdev(netdev);
         return -1;
     }
     /* Pre-fill RX descriptors with packet buffers */
@@ -247,6 +271,7 @@ static int virtio_net_probe(struct pci_dev *pdev, const struct pci_device_id *id
     if (tx_size > VIRTIO_NET_QUEUE_SIZE) tx_size = VIRTIO_NET_QUEUE_SIZE;
     if (vring_setup(&vdev->tx_vq, tx_size) != 0) {
         pr_err("cherry_net: tx vring setup failed\n");
+        free_netdev(netdev);
         return -1;
     }
     uintptr_t tx_phys = (uintptr_t)vdev->tx_vq.desc;
@@ -256,27 +281,24 @@ static int virtio_net_probe(struct pci_dev *pdev, const struct pci_device_id *id
     pci_assign_irq(pdev);
     v_out8(io, VIRTIO_PCI_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_DRIVER_OK);
 
-    /* 8. Register Network Interface eth0 */
-    memset(&s_virtio_netif, 0, sizeof(s_virtio_netif));
-    memcpy(s_virtio_netif.hwaddr, vdev->mac, ETH_ALEN);
-    s_virtio_netif.send = virtio_net_send;
-    s_virtio_netif.priv = vdev;
-    s_virtio_netif.flags = NETIF_FLAG_UP | NETIF_FLAG_BROADCAST | NETIF_FLAG_ETH;
+    /* 8. Setup Net Device Operations and Register */
+    netdev->netdev_ops = &s_virtio_netdev_ops;
+    strncpy(netdev->name, "eth0", sizeof(netdev->name) - 1);
+    register_netdev(netdev);
 
     /* IPv4: 10.0.2.15/24, GW: 10.0.2.2 (Standard QEMU user networking) */
-    s_virtio_netif.ip4_addr.addr = IP4_ADDR(10, 0, 2, 15);
-    s_virtio_netif.ip4_netmask.addr = IP4_ADDR(255, 255, 255, 0);
-    s_virtio_netif.ip4_gw.addr = IP4_ADDR(10, 0, 2, 2);
-
-    /* IPv6 Link-Local */
-    ip6_addr_create_linklocal(&s_virtio_netif.ip6_ll, vdev->mac);
-
-    netif_register(&s_virtio_netif, "eth0", 1500);
-    netif_set_up(&s_virtio_netif);
-    netif_set_default(&s_virtio_netif);
+    struct netif *nif = netdev->sys_netif;
+    if (nif) {
+        nif->ip4_addr.addr = IP4_ADDR(10, 0, 2, 15);
+        nif->ip4_netmask.addr = IP4_ADDR(255, 255, 255, 0);
+        nif->ip4_gw.addr = IP4_ADDR(10, 0, 2, 2);
+        ip6_addr_create_linklocal(&nif->ip6_ll, vdev->mac);
+        netif_set_up(nif);
+        netif_set_default(nif);
+    }
 
     pci_set_drvdata(pdev, vdev);
-    pr_info("cherry_net: virtio-net eth0 registered successfully (irq=%d)\n", pdev->irq);
+    pr_info("cherry_net: virtio-net '%s' registered into net_device model (irq=%d)\n", netdev->name, pdev->irq);
     return 0;
 }
 
