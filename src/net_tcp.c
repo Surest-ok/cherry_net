@@ -207,6 +207,14 @@ struct tcp_pcb *tcp_accept(struct tcp_pcb *pcb, void *addr, socklen_t *addrlen)
             child->next_pending = NULL;
             spin_unlock_irqrestore(&pcb->lock, flags);
 
+            if (child->state == TCP_STATE_SYN_RCVD) {
+                long t = pcb->rcv_timeout_ms ? (long)pcb->rcv_timeout_ms : 3000;
+                if (down_timeout(&child->conn_sem, t) != 0 || child->state != TCP_STATE_ESTABLISHED) {
+                    tcp_close(child);
+                    continue;
+                }
+            }
+
             if (addr && addrlen) {
                 if (child->family == AF_INET && *addrlen >= sizeof(struct sockaddr_in)) {
                     struct sockaddr_in *sin = (struct sockaddr_in *)addr;
@@ -277,6 +285,15 @@ ssize_t tcp_recv(struct tcp_pcb *pcb, void *buf, size_t len, int flags)
             pcb->rx_avail -= copy_bytes;
             spin_unlock_irqrestore(&pcb->lock, iflags);
             return (ssize_t)copy_bytes;
+        }
+
+        if (pcb->state == TCP_STATE_SYN_RCVD) {
+            spin_unlock_irqrestore(&pcb->lock, iflags);
+            long timeout = pcb->rcv_timeout_ms ? (long)pcb->rcv_timeout_ms : 1000;
+            if (down_timeout(&pcb->conn_sem, timeout) != 0) {
+                return -1;
+            }
+            continue;
         }
 
         if (pcb->state != TCP_STATE_ESTABLISHED) {
@@ -414,9 +431,8 @@ int tcp_input(struct netif *nif, struct net_buf *buf, uint16_t family,
                 listen_pcb->accept_queue_tail = child;
             }
 
-            up(&listen_pcb->conn_sem);
-
             spin_unlock_irqrestore(&s_tcp_lock, gflags);
+            up(&listen_pcb->conn_sem);
 
             /* Reply SYN-ACK */
             tcp_send_packet(child, TCP_SYN | TCP_ACK, NULL, 0);
@@ -432,19 +448,24 @@ int tcp_input(struct netif *nif, struct net_buf *buf, uint16_t family,
         return 0;
     }
 
-    spin_lock(&pcb->lock);
     spin_unlock_irqrestore(&s_tcp_lock, gflags);
+
+    unsigned long flags_pcb;
+    spin_lock_irqsave(&pcb->lock, flags_pcb);
+
+    bool wake_conn = false;
+    bool wake_rx = false;
 
     if (pcb->state == TCP_STATE_SYN_SENT && (flags & TCP_SYN) && (flags & TCP_ACK)) {
         pcb->rcv_nxt = seq + 1;
         pcb->snd_una = ack;
         pcb->state = TCP_STATE_ESTABLISHED;
         tcp_send_packet(pcb, TCP_ACK, NULL, 0);
-        up(&pcb->conn_sem);
+        wake_conn = true;
     } else if (pcb->state == TCP_STATE_SYN_RCVD && (flags & TCP_ACK)) {
         pcb->state = TCP_STATE_ESTABLISHED;
         pcb->snd_una = ack;
-        up(&pcb->conn_sem);
+        wake_conn = true;
     } else if (pcb->state == TCP_STATE_ESTABLISHED || pcb->state == TCP_STATE_CLOSE_WAIT) {
         if (payload_len > 0 && pcb->rx_ring) {
             size_t space = TCP_WND_SIZE - pcb->rx_avail;
@@ -459,14 +480,14 @@ int tcp_input(struct netif *nif, struct net_buf *buf, uint16_t family,
 
             /* Send ACK */
             tcp_send_packet(pcb, TCP_ACK, NULL, 0);
-            up(&pcb->rx_sem);
+            wake_rx = true;
         }
 
         if (flags & TCP_FIN) {
             pcb->state = TCP_STATE_CLOSE_WAIT;
             pcb->rcv_nxt = seq + 1;
             tcp_send_packet(pcb, TCP_ACK, NULL, 0);
-            up(&pcb->rx_sem);
+            wake_rx = true;
         }
     } else if (pcb->state == TCP_STATE_FIN_WAIT_1 && (flags & TCP_ACK)) {
         pcb->state = TCP_STATE_FIN_WAIT_2;
@@ -474,16 +495,24 @@ int tcp_input(struct netif *nif, struct net_buf *buf, uint16_t family,
             pcb->rcv_nxt = seq + 1;
             tcp_send_packet(pcb, TCP_ACK, NULL, 0);
             pcb->state = TCP_STATE_CLOSED;
-            up(&pcb->rx_sem);
+            wake_rx = true;
         }
     } else if (pcb->state == TCP_STATE_FIN_WAIT_2 && (flags & TCP_FIN)) {
         pcb->rcv_nxt = seq + 1;
         tcp_send_packet(pcb, TCP_ACK, NULL, 0);
         pcb->state = TCP_STATE_CLOSED;
+        wake_rx = true;
+    }
+
+    spin_unlock_irqrestore(&pcb->lock, flags_pcb);
+
+    if (wake_conn) {
+        up(&pcb->conn_sem);
+    }
+    if (wake_rx) {
         up(&pcb->rx_sem);
     }
 
-    spin_unlock(&pcb->lock);
     net_buf_free(buf);
     return 0;
 }

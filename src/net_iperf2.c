@@ -8,6 +8,7 @@
 #include "net_iperf2.h"
 #include "net_types.h"
 #include "cherry_kal.h"
+extern int close(int fd);
 #include "sys/socket.h"
 #include "netinet/in.h"
 #include "arpa/inet.h"
@@ -201,7 +202,9 @@ static int iperf_srv_task(void *arg)
             sp->elapsed_us = (t1 - t0) / 1000ULL;
             kfree(rx_buf);
         }
+        close(client_fd);
     }
+    close(listen_fd);
     sp->done = true;
     return 0;
 }
@@ -210,7 +213,7 @@ int iperf2_run_self_test(void)
 {
     pr_info("cherry_net: starting iperf2 multi-core throughput benchmark...\n");
 
-    struct iperf_server_param srv_param;
+    static struct iperf_server_param srv_param;
     memset(&srv_param, 0, sizeof(srv_param));
     srv_param.port = 5001;
     srv_param.ready = false;

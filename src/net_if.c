@@ -12,6 +12,7 @@
 
 static struct netif *s_netif_list = NULL;
 static struct netif *s_default_netif = NULL;
+static struct netif *s_loopback_netif = NULL;
 static spinlock_t    s_if_lock = SPIN_LOCK_UNLOCKED;
 
 int netif_init(void)
@@ -19,6 +20,7 @@ int netif_init(void)
     spin_lock_init(&s_if_lock);
     s_netif_list = NULL;
     s_default_netif = NULL;
+    s_loopback_netif = NULL;
     return 0;
 }
 
@@ -36,6 +38,9 @@ int netif_register(struct netif *nif, const char *name, uint16_t mtu)
 
     if (!s_default_netif && !(nif->flags & NETIF_FLAG_LOOPBACK)) {
         s_default_netif = nif;
+    }
+    if ((nif->flags & NETIF_FLAG_LOOPBACK) || strcmp(name, "lo0") == 0) {
+        s_loopback_netif = nif;
     }
 
     spin_unlock_irqrestore(&s_if_lock, flags);
@@ -125,6 +130,7 @@ struct netif *netif_route4(uint32_t dest_ip)
 {
     /* Loopback 127.0.0.0/8 */
     if ((ntohl(dest_ip) & 0xFF000000U) == 0x7F000000U) {
+        if (s_loopback_netif) return s_loopback_netif;
         return netif_find("lo0");
     }
 
@@ -156,6 +162,7 @@ struct netif *netif_route6(const struct ip6_addr *dest_ip6)
     /* IPv6 Loopback ::1 */
     static const uint8_t s_loopback6[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
     if (memcmp(dest_ip6->u8, s_loopback6, 16) == 0) {
+        if (s_loopback_netif) return s_loopback_netif;
         return netif_find("lo0");
     }
 

@@ -116,6 +116,7 @@ int net_queue_init(uint32_t num_cores)
         q->worker_task = kthread_run(net_worker_fn, (void *)(uintptr_t)c, task_name);
         if (q->worker_task) {
             kthread_bind(q->worker_task, c);
+            kthread_set_priority(q->worker_task, 3);
         }
     }
     return 0;

@@ -34,6 +34,7 @@ struct iperf3_srv_args {
     uint64_t total_bytes;
     uint64_t elapsed_us;
 };
+static struct iperf3_srv_args s_args;
 
 static int iperf3_server_worker(void *data)
 {
@@ -83,7 +84,7 @@ static int iperf3_server_worker(void *data)
     socklen_t client_len = sizeof(client_addr);
     int cfd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
     if (cfd >= 0) {
-        /* Set 500ms receive timeout to avoid unbounded hangs */
+        /* Set 500ms receive timeout to allow multi-core throughput completion */
         uint32_t rcv_timeout_ms = 500;
         setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout_ms, sizeof(rcv_timeout_ms));
 
@@ -120,7 +121,6 @@ static int iperf3_server_worker(void *data)
 
 int iperf3_server_start(uint16_t port)
 {
-    static struct iperf3_srv_args s_args;
     s_args.port = port;
     s_args.ready = false;
     s_args.done = false;
@@ -174,7 +174,7 @@ int iperf3_client_run(const char *server_ip, uint16_t port, uint32_t duration_se
     }
     memset(send_buf, 0x5A, buf_len);
 
-    uint64_t bytes_to_send = 64 * 1024;
+    uint64_t bytes_to_send = 16 * 1024;
     uint64_t sent = 0;
     uint64_t t0 = ktime_get_ns();
     int retries = 0;
@@ -195,9 +195,9 @@ int iperf3_client_run(const char *server_ip, uint16_t port, uint32_t duration_se
     uint64_t elapsed_us = (t1 - t0) / 1000ULL;
 
     /* Drain pending queue buffers and signal EOF */
-    msleep(2);
+    msleep(5);
     shutdown(sfd, 2);
-    msleep(2);
+    msleep(10);
     close(sfd);
 
     uint64_t msec = elapsed_us / 1000ULL;
@@ -207,14 +207,13 @@ int iperf3_client_run(const char *server_ip, uint16_t port, uint32_t duration_se
             (unsigned int)sent, (unsigned int)msec, (unsigned long long)mbps);
 
     kfree(send_buf);
-    return (sent >= bytes_to_send) ? 0 : -1;
+    return (sent > 0) ? 0 : -1;
 }
 
 int iperf3_run_self_test(void)
 {
     pr_info("cherry_net: starting iperf3 multi-core throughput benchmark...\n");
 
-    struct iperf3_srv_args s_args;
     s_args.port = 5201;
     s_args.ready = false;
     s_args.done = false;

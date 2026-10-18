@@ -15,12 +15,12 @@
 extern "C" {
 #endif
 
-#define NETIF_FLAG_UP         0x01U
-#define NETIF_FLAG_BROADCAST  0x02U
-#define NETIF_FLAG_LOOPBACK   0x04U
-#define NETIF_FLAG_LINK_UP    0x08U
-#define NETIF_FLAG_ETH        0x10U
-#define NETIF_FLAG_RUNNING    0x20U
+#define NETIF_FLAG_UP         0x0001U
+#define NETIF_FLAG_BROADCAST  0x0002U
+#define NETIF_FLAG_LOOPBACK   0x0008U
+#define NETIF_FLAG_ETH        0x0010U
+#define NETIF_FLAG_LINK_UP    0x0020U
+#define NETIF_FLAG_RUNNING    0x0040U
 
 struct netif {
     char            name[8];        /* e.g. "eth0", "lo0" */

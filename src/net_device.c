@@ -117,6 +117,9 @@ int register_netdev(struct net_device *dev)
     nif->priv = dev;
     nif->send = netdev_netif_send;
     nif->flags = (uint16_t)dev->flags;
+    if (dev->flags & IFF_LOOPBACK) {
+        nif->flags |= NETIF_FLAG_LOOPBACK;
+    }
 
     /* Register netif with core stack */
     netif_register(nif, dev->name, (uint16_t)dev->mtu);

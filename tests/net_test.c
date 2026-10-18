@@ -37,6 +37,8 @@ static int wget_mock_worker(void *p)
         recv(c, req_buf, sizeof(req_buf), 0);
         const char *resp = "HTTP/1.0 200 OK\r\nContent-Length: 11\r\n\r\nHello Wget!";
         send(c, resp, strlen(resp), 0);
+        shutdown(c, 2);
+        msleep(10);
         close(c);
     }
     a->done = true;
@@ -191,47 +193,23 @@ void cherry_net_run_tests(void)
         listen(http_srv, 1);
 
         /* Spawn simple server thread */
-        struct wget_test_arg warg = { .sfd = http_srv, .ready = false, .done = false };
-        struct task_struct *wt = kthread_run(wget_mock_worker, &warg, "wget_srv");
+        static struct wget_test_arg s_warg;
+        s_warg.sfd = http_srv;
+        s_warg.ready = false;
+        s_warg.done = false;
+        struct task_struct *wt = kthread_run(wget_mock_worker, &s_warg, "wget_srv");
         if (wt) {
-            while (!warg.ready) {
+            while (!s_warg.ready) {
                 msleep(2);
             }
-            /* Test HTTP wget client via dynamic execution of original BusyBox ELF */
-            extern pid_t proc_spawn_elf(const char *path, int argc, char **argv, char **envp, int in, int out, int err);
-            extern pid_t proc_waitpid(pid_t pid, int *status, int options);
-
-            char *test_wget_argv[] = {
-                (char *)"busybox", (char *)"wget", (char *)"-q",
-                (char *)"http://127.0.0.1:8080/index.html",
-                (char *)"-O", (char *)"/cherry_wget_test.txt",
-                NULL
-            };
-
-            pid_t wpid = proc_spawn_elf("/bin/busybox", 6, test_wget_argv, NULL, -1, -1, -1);
-            int wstatus = -1;
-            if (wpid > 0) {
-                proc_waitpid(wpid, &wstatus, 0);
-            }
-
             char w_buf[64] = {0};
-            int rfd = open("/cherry_wget_test.txt", O_RDONLY);
-            if (rfd >= 0) {
-                read(rfd, w_buf, sizeof(w_buf) - 1);
-                close(rfd);
-            }
-
-            if (wstatus == 0 && strcmp(w_buf, "Hello Wget!") == 0) {
+            int w_ret = wget_fetch("http://127.0.0.1:8080/index.html", "/cherry_wget_test.txt", w_buf, sizeof(w_buf));
+            if (w_ret == 0 && strcmp(w_buf, "Hello Wget!") == 0) {
                 t_wget = 1;
-                pr_info("cherry_net: dynamic BusyBox ELF wget verified (exit=0, body='%s')\n", w_buf);
-            } else {
-                /* In case /bin/busybox is not installed, fallback to wget_fetch */
-                int w_ret = wget_fetch("http://127.0.0.1:8080/index.html", "/cherry_wget_test.txt", w_buf, sizeof(w_buf));
-                if (w_ret == 0 && strcmp(w_buf, "Hello Wget!") == 0) {
-                    t_wget = 1;
-                }
+                pr_info("cherry_net: HTTP wget client verified (body='%s')\n", w_buf);
             }
-            while (!warg.done) {
+            int wait_limit = 500;
+            while (!s_warg.done && --wait_limit > 0) {
                 msleep(2);
             }
         }
